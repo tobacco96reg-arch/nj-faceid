@@ -44,7 +44,8 @@ function show(icon, title, text, button, onClick) {
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
   .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-if (!tg || !tg.BiometricManager || !tg.initData) {
+// initData пустой у кнопок внизу чата (так задумано Telegram) — проверяем только, что открыто в Telegram
+if (!tg || !tg.BiometricManager || tg.platform === "unknown") {
   show("⚠️", "Открой из бота", "Эта страница работает только кнопкой в Telegram-боте NJ.");
 } else {
   tg.ready(); tg.expand();
