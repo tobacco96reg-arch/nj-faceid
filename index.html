@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NJ · Face ID</title>
+<!-- Мини-приложение бота @NeuroJeffBot: Face ID → подпись для замка. Секретов здесь нет:
+     закрытый ключ создаётся на айфоне и лежит только в защищённом хранилище Telegram (BiometricManager). -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --bg: var(--tg-theme-bg-color, #000); --fg: var(--tg-theme-text-color, #f5f5f7);
+          --hint: var(--tg-theme-hint-color, #8e8e93); --btn: var(--tg-theme-button-color, #5e5ce6);
+          --btn-fg: var(--tg-theme-button-text-color, #fff); }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: var(--bg); color: var(--fg); text-align: center;
+         font: 17px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  main { padding: 32px 24px; max-width: 420px; }
+  .icon { font-size: 72px; line-height: 1; margin-bottom: 16px; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  p { color: var(--hint); margin: 0 0 20px; }
+  button { display: none; font: 600 17px -apple-system, system-ui, sans-serif; border: 0; border-radius: 14px;
+           padding: 14px 22px; background: var(--btn); color: var(--btn-fg); width: 100%; }
+</style>
+</head>
+<body>
+<main>
+  <div class="icon" id="icon">🔐</div>
+  <h1 id="title">Проверка Face ID…</h1>
+  <p id="text"></p>
+  <button id="again"></button>
+</main>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+const mode = new URLSearchParams(location.search).get("m") === "setup" ? "setup" : "auth";
+const $ = id => document.getElementById(id);
+
+function show(icon, title, text, button, onClick) {
+  $("icon").textContent = icon; $("title").textContent = title; $("text").textContent = text || "";
+  const b = $("again");
+  b.style.display = button ? "block" : "none";
+  b.textContent = button || ""; b.onclick = onClick || null;
+}
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+if (!tg || !tg.BiometricManager || !tg.initData) {
+  show("⚠️", "Открой из бота", "Эта страница работает только кнопкой в Telegram-боте NJ.");
+} else {
+  tg.ready(); tg.expand();
+  const bm = tg.BiometricManager;
+
+  // Разрешение Telegram на Face ID (один раз). Отказали раньше — только через настройки, по нажатию.
+  const access = next => {
+    if (bm.isAccessGranted) return next();
+    if (bm.isAccessRequested) return show("🙈", "Face ID не разрешён",
+      "Разреши Telegram пользоваться Face ID для NJ.", "Открыть настройки", () => bm.openSettings());
+    bm.requestAccess({ reason: "NJ будет открывать замок бота по твоему лицу" },
+      ok => ok ? next() : show("🙈", "Face ID не разрешён", "Без разрешения откроет только код из «Паролей»."));
+  };
+
+  // Включение: новый ключ P-256 → закрытый в хранилище Telegram (под Face ID), открытый → боту.
+  const setup = () => access(async () => {
+    show("🔐", "Включаю Face ID…", "Посмотри на айфон.");
+    const k = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const j = await crypto.subtle.exportKey("jwk", k.privateKey);
+    bm.updateBiometricToken(JSON.stringify({ d: j.d, x: j.x, y: j.y }), ok => {
+      if (!ok) return show("⚠️", "Не сохранилось", "Telegram не сохранил ключ.", "Ещё раз", setup);
+      tg.sendData(JSON.stringify({ t: "setup", x: j.x, y: j.y, dev: bm.deviceId }));  // окно закроется само
+    });
+  });
+
+  // Проверка: Face ID → ключ из хранилища → подпись «nj-unlock:<время>» → боту.
+  const auth = () => {
+    if (!bm.isBiometricTokenSaved) return show("🔐", "Face ID ещё не включён",
+      "Пришли боту код из «Паролей», потом команду /faceid.");
+    access(() => bm.authenticate({ reason: "Открыть замок NJ" }, async (ok, token) => {
+      if (!ok || !token) return show("✖️", "Не подтвердилось", "Можно ещё раз — или пришли код.", "Ещё раз", auth);
+      try {
+        const j = JSON.parse(token);
+        const key = await crypto.subtle.importKey("jwk", { kty: "EC", crv: "P-256", d: j.d, x: j.x, y: j.y, ext: true },
+          { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+        const ts = Math.floor(Date.now() / 1000);
+        const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key,
+          new TextEncoder().encode("nj-unlock:" + ts));
+        tg.sendData(JSON.stringify({ t: "auth", ts: ts, sig: b64u(sig) }));
+      } catch (e) {
+        show("⚠️", "Ключ испорчен", "Пришли боту код, потом /faceid — включим заново.");
+      }
+    }));
+  };
+
+  bm.init(() => {
+    if (!bm.isBiometricAvailable) return show("⚠️", "Face ID недоступен",
+      "На этом устройстве Telegram не может спросить Face ID. Открыть замок — кодом из «Паролей».");
+    mode === "setup" ? setup() : auth();
+  });
+}
+</script>
+</body>
+</html>
